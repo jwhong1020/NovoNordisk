@@ -116,3 +116,10 @@ sample_oct_image.png
 
 # Anomaly detection outputs
 output/anomaly_detection/
+
+# images
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.bmp
