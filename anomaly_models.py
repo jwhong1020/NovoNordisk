@@ -22,14 +22,15 @@ class AnomalyDetector(nn.Module):
         """Forward pass returns reconstructed image"""
         return self.generator(x)
     
-    def compute_anomaly_score(self, original, reconstructed, method='mse'):
+    def compute_anomaly_score(self, original, reconstructed, method='mse', border_margin=16):
         """
-        Compute anomaly score based on reconstruction error.
+        Compute anomaly score based on reconstruction error, excluding border regions.
         
         Args:
             original: Original input image
             reconstructed: Reconstructed image from generator
             method: Method for computing anomaly score ('mse', 'ssim', 'combined')
+            border_margin: Number of pixels to exclude from borders (default: 16)
         
         Returns:
             anomaly_score: Higher values indicate more likely anomalies
@@ -38,29 +39,43 @@ class AnomalyDetector(nn.Module):
         if method == 'mse':
             # Mean Squared Error between original and reconstructed
             difference_map = torch.pow(original - reconstructed, 2)
-            anomaly_score = torch.mean(difference_map, dim=[1, 2, 3])  # Average over spatial dimensions
             
         elif method == 'l1':
             # L1 (Mean Absolute Error) loss
             difference_map = torch.abs(original - reconstructed)
-            anomaly_score = torch.mean(difference_map, dim=[1, 2, 3])
             
         elif method == 'combined':
             # Combined MSE + perceptual loss (simplified)
             mse_loss = torch.pow(original - reconstructed, 2)
             l1_loss = torch.abs(original - reconstructed)
             difference_map = 0.7 * mse_loss + 0.3 * l1_loss
+        
+        # Exclude border regions from anomaly score calculation
+        # Extract central region excluding borders
+        if border_margin > 0:
+            h, w = difference_map.shape[-2], difference_map.shape[-1]
+            if h > 2 * border_margin and w > 2 * border_margin:
+                # Extract central region: [batch, channels, h_start:h_end, w_start:w_end]
+                central_region = difference_map[:, :, border_margin:-border_margin, border_margin:-border_margin]
+                anomaly_score = torch.mean(central_region, dim=[1, 2, 3])  # Average over spatial dimensions
+            else:
+                # If image is too small, use the full image
+                print(f"Warning: Image size ({h}x{w}) too small for border margin {border_margin}. Using full image.")
+                anomaly_score = torch.mean(difference_map, dim=[1, 2, 3])
+        else:
+            # Use full image if border_margin is 0
             anomaly_score = torch.mean(difference_map, dim=[1, 2, 3])
             
         return anomaly_score, difference_map
     
-    def detect_anomalies(self, images, threshold=None):
+    def detect_anomalies(self, images, threshold=None, border_margin=16):
         """
         Detect anomalies in a batch of images.
         
         Args:
             images: Batch of input images
             threshold: Anomaly threshold (if None, returns raw scores)
+            border_margin: Number of pixels to exclude from borders when calculating anomaly score
         
         Returns:
             anomaly_scores: Anomaly scores for each image
@@ -73,8 +88,8 @@ class AnomalyDetector(nn.Module):
             # Reconstruct images
             reconstructed = self.generator(images)
             
-            # Compute anomaly scores
-            anomaly_scores, difference_maps = self.compute_anomaly_score(images, reconstructed)
+            # Compute anomaly scores (excluding border regions)
+            anomaly_scores, difference_maps = self.compute_anomaly_score(images, reconstructed, border_margin=border_margin)
             
             predictions = None
             if threshold is not None:

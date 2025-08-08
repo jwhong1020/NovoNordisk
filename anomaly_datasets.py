@@ -140,3 +140,87 @@ class AnomalyDatasetGrayscale(Dataset):
     
     def __len__(self):
         return len(self.files)
+
+
+class MultiClassAnomalyDatasetGrayscale(Dataset):
+    """
+    Dataset for testing anomaly detection performance across different disease classes.
+    Allows testing Normal vs specific disease classes (CNV, DME, DRUSEN) individually.
+    """
+    def __init__(self, dataset_root, disease_class='CNV', transform=None):
+        """
+        Args:
+            dataset_root: Root directory containing test data (e.g., 'OCT2017')
+            disease_class: Disease class to test ('CNV', 'DME', 'DRUSEN', or 'ALL')
+            transform: Transform to apply to images
+        """
+        self.transform = transform
+        self.disease_class = disease_class
+        
+        # Load normal images
+        normal_dir = os.path.join(dataset_root, 'test', 'NORMAL')
+        normal_files = []
+        for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+            normal_files.extend(glob.glob(os.path.join(normal_dir, ext)))
+        
+        # Load disease-specific images
+        if disease_class == 'ALL':
+            # Load all disease classes
+            disease_files = []
+            disease_labels = []
+            class_names = ['CNV', 'DME', 'DRUSEN']
+            for i, class_name in enumerate(class_names):
+                disease_dir = os.path.join(dataset_root, 'test', class_name)
+                class_files = []
+                for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+                    class_files.extend(glob.glob(os.path.join(disease_dir, ext)))
+                disease_files.extend(class_files)
+                disease_labels.extend([i + 1] * len(class_files))  # 1=CNV, 2=DME, 3=DRUSEN
+            
+            # Combine files and labels
+            self.files = normal_files + disease_files
+            self.labels = [0] * len(normal_files) + disease_labels  # 0=normal
+            self.class_names = ['NORMAL'] + class_names
+            
+        else:
+            # Load specific disease class
+            disease_dir = os.path.join(dataset_root, 'test', disease_class)
+            disease_files = []
+            for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+                disease_files.extend(glob.glob(os.path.join(disease_dir, ext)))
+            
+            # Combine files and create binary labels
+            self.files = normal_files + disease_files
+            self.labels = [0] * len(normal_files) + [1] * len(disease_files)  # 0=normal, 1=disease
+            self.class_names = ['NORMAL', disease_class]
+        
+        print(f"Loaded dataset for {disease_class}:")
+        print(f"  Normal images: {len(normal_files)}")
+        if disease_class == 'ALL':
+            cnv_count = sum(1 for label in disease_labels if label == 1)
+            dme_count = sum(1 for label in disease_labels if label == 2)
+            drusen_count = sum(1 for label in disease_labels if label == 3)
+            print(f"  CNV images: {cnv_count}")
+            print(f"  DME images: {dme_count}")
+            print(f"  DRUSEN images: {drusen_count}")
+        else:
+            print(f"  {disease_class} images: {len(disease_files)}")
+    
+    def __getitem__(self, index):
+        image_path = self.files[index]
+        label = self.labels[index]
+        
+        # Load image and convert to grayscale
+        image = Image.open(image_path).convert('L')
+        
+        if self.transform:
+            image = self.transform(image)
+            
+        return {'image': image, 'label': label, 'path': image_path}
+    
+    def __len__(self):
+        return len(self.files)
+    
+    def get_class_name(self, label):
+        """Get class name from label"""
+        return self.class_names[label]
