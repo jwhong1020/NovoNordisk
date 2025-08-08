@@ -7,6 +7,14 @@ from PIL import Image
 import torchvision.transforms as transforms
 import numpy as np
 
+from torch.utils.data import DataLoader
+
+def get_loader(root, transforms_, mode='train', batch_size=1, shuffle=True, num_workers=4):
+    dataset = AnomalyDataset(root=root, transforms_=transforms_, mode=mode)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+    return loader
+
+
 class AnomalyDataset(Dataset):
     """
     Dataset class for anomaly detection using CycleGAN.
@@ -224,3 +232,30 @@ class MultiClassAnomalyDatasetGrayscale(Dataset):
     def get_class_name(self, label):
         """Get class name from label"""
         return self.class_names[label]
+
+class NormalOnlyDataset(Dataset):
+    """
+    Dataset that only loads normal images (RGB) for self-supervised training.
+    """
+    def __init__(self, root, transforms_=None, mode='train'):
+        self.transform = transforms.Compose(transforms_)
+        
+        if mode == 'train':
+            self.files = sorted(glob.glob(os.path.join(root, 'train/NORMAL', '*.*')))
+        elif mode == 'val':
+            self.files = sorted(glob.glob(os.path.join(root, 'val/NORMAL', '*.*')))
+        else:
+            self.files = sorted(glob.glob(os.path.join(root, 'test/NORMAL', '*.*')))
+        
+        print(f"Loaded {len(self.files)} normal RGB images for {mode}")
+
+    def __getitem__(self, index):
+        image_path = self.files[index % len(self.files)]
+        image = Image.open(image_path)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        image = self.transform(image)
+        return {'A': image, 'B': image, 'path': image_path}
+
+    def __len__(self):
+        return len(self.files)
