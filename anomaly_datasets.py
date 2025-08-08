@@ -7,6 +7,14 @@ from PIL import Image
 import torchvision.transforms as transforms
 import numpy as np
 
+from torch.utils.data import DataLoader
+
+def get_loader(root, transforms_, mode='train', batch_size=1, shuffle=True, num_workers=4):
+    dataset = AnomalyDataset(root=root, transforms_=transforms_, mode=mode)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+    return loader
+
+
 class AnomalyDataset(Dataset):
     """
     Dataset class for anomaly detection using CycleGAN.
