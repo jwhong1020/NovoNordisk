@@ -5,6 +5,8 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import glob
+import shutil
 from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve, classification_report
 import pandas as pd
 
@@ -18,19 +20,21 @@ from anomaly_models import AnomalyDetector
 from anomaly_datasets import AnomalyDataset
 from utils import tensor2image
 
+# python test_anomaly.py --dataset_name datasets/preprocessed_resized --model_epoch 4 --model_type gray --border_margin 16
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_name', type=str, default='OCT2017', help='name of the dataset')
-    parser.add_argument('--batch_size', type=int, default=1, help='size of the batches')
-    parser.add_argument('--img_height', type=int, default=256, help='size of image height')
-    parser.add_argument('--img_width', type=int, default=256, help='size of image width')
-    parser.add_argument('--channels', type=int, default=3, help='number of image channels')
+    parser.add_argument('--batch_size', type=int, default=8, help='size of the batches')
+    parser.add_argument('--img_height', type=int, default=-1, help='size of image height')
+    parser.add_argument('--img_width', type=int, default=-1, help='size of image width')
+    parser.add_argument('--channels', type=int, default=1, help='number of image channels')
     parser.add_argument('--n_residual_blocks', type=int, default=9, help='number of residual blocks in generator')
     parser.add_argument('--model_epoch', type=int, default=200, help='epoch of trained model to load')
     parser.add_argument('--score_method', type=str, default='mse', choices=['mse', 'l1', 'combined'], help='anomaly scoring method')
     parser.add_argument('--threshold', type=float, default=None, help='anomaly threshold (if None, will be computed automatically)')
     parser.add_argument('--n_cpu', type=int, default=0, help='number of cpu threads to use during batch generation')
-    parser.add_argument('--model_type', type=str, default='rgb', choices=['rgb', 'gray'], help='model type (rgb or grayscale)')
+    parser.add_argument('--model_type', type=str, default='gray', choices=['rgb', 'gray'], help='model type (rgb or grayscale)')
     parser.add_argument('--border_margin', type=int, default=16, help='number of pixels to exclude from borders when calculating anomaly score')
     parser.add_argument('--use_concentration', type=bool, default=True, help='whether to apply concentration penalty for clustered anomalies')
     parser.add_argument('--concentration_weight', type=float, default=2.0, help='weight for concentration penalty (higher = more penalty for concentration)')
@@ -45,8 +49,30 @@ if __name__ == '__main__':
     else:
         print(f"Using RGB model with {opt.channels} channel(s)")
 
-# Create output directory
-os.makedirs('output/anomaly_detection/%s' % opt.dataset_name, exist_ok=True)
+# Create output directory with model epoch subfolder and clean previous results
+output_dir = f'output/anomaly_detection/{opt.dataset_name}/epoch_{opt.model_epoch}'
+os.makedirs(output_dir, exist_ok=True)
+
+# Clean previous images and results
+print("Cleaning previous test results...")
+try:
+    # Remove previous image files
+    for pattern in ['top_anomaly_*.png', 'roc_curve.png', 'score_distribution.png', 'detailed_results.csv']:
+        files_to_remove = glob.glob(os.path.join(output_dir, pattern))
+        for file_path in files_to_remove:
+            os.remove(file_path)
+            print(f"  Removed: {os.path.basename(file_path)}")
+    
+    if len(glob.glob(os.path.join(output_dir, '*'))) == 0:
+        print("  Output directory is now clean")
+    else:
+        remaining_files = glob.glob(os.path.join(output_dir, '*'))
+        print(f"  {len(remaining_files)} other files remain in output directory")
+        
+except Exception as e:
+    print(f"  Warning: Could not clean some files: {e}")
+
+print("Starting anomaly detection evaluation...")
 
 cuda = torch.cuda.is_available()
 Tensor = torch.cuda.FloatTensor if cuda else torch.Tensor
@@ -73,15 +99,21 @@ else:
 # Set to evaluation mode
 anomaly_detector.eval()
 
+# Modified transforms for original size preservation
+transforms_ = []
+
+# Only resize if dimensions are specified and different from a "preserve" flag
+if opt.img_height != -1 and opt.img_width != -1:  # Could add -1 as "preserve original"
+    transforms_.append(transforms.Resize((opt.img_height, opt.img_width), transforms.InterpolationMode.BICUBIC))
+
+
 # Image transformations
 if opt.model_type == 'gray':
-    transforms_ = [ transforms.Resize((opt.img_height, opt.img_width), transforms.InterpolationMode.BICUBIC),
-                    transforms.ToTensor(),
-                    transforms.Normalize((0.5,), (0.5,)) ]
+    transforms_.extend([ transforms.ToTensor(),
+                    transforms.Normalize((0.5,), (0.5,)) ])
 else:
-    transforms_ = [ transforms.Resize((opt.img_height, opt.img_width), transforms.InterpolationMode.BICUBIC),
-                    transforms.ToTensor(),
-                    transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ]
+    transforms_.extend([ transforms.ToTensor(),
+                    transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ])
 
 # Test data loader
 if opt.model_type == 'gray':
@@ -105,95 +137,109 @@ def compute_optimal_threshold(scores, labels):
     optimal_threshold = thresholds[optimal_idx]
     return optimal_threshold
 
-def visualize_results(images, reconstructed, difference_maps, scores, labels, paths, border_margin=16, save_top_n=10):
-    """Visualize top anomalies and normal samples with border cropping"""
+def visualize_results(images, reconstructed, difference_maps, scores, labels, paths, output_dir, border_margin=16, save_top_n=5):
+    """Visualize top 5 anomalies, top 5 normals, and bottom 5 anomalies with border cropping"""
     
-    # Sort by anomaly score (descending)
-    sorted_indices = np.argsort(scores)[::-1]
+    # Convert to numpy arrays for easier indexing
+    scores = np.array(scores)
+    labels = np.array(labels)
     
-    # Save top anomalies
-    print(f"\nTop {save_top_n} highest scoring samples:")
-    for i in range(min(save_top_n, len(sorted_indices))):
-        idx = sorted_indices[i]
-        score = scores[idx]
-        label = labels[idx]
-        path = paths[idx]
-        
-        # Convert tensors to images
-        original = tensor2image(images[idx])
-        recon = tensor2image(reconstructed[idx])
-        diff = tensor2image(difference_maps[idx])
-        
-        # Debug shapes for grayscale
-        if opt.model_type == 'gray':
-            print(f"Debug shapes - Original: {original.shape}, Recon: {recon.shape}, Diff: {diff.shape}")
-        
-        # Create visualization
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        
-        # Handle grayscale vs RGB display
-        if opt.model_type == 'gray':
-            # For grayscale, the tensor2image function tiles to 3 channels
-            # So we need to use the original format and handle it properly
-            if len(original.shape) == 3 and original.shape[0] == 3:
-                # tensor2image tiled the grayscale to RGB, so take one channel
-                orig_gray = original[0]  # Shape: (H, W)
-                recon_gray = recon[0]    # Shape: (H, W)  
-                diff_gray = diff[0]      # Shape: (H, W)
+    # Separate anomaly and normal indices
+    anomaly_indices = np.where(labels == 1)[0]
+    normal_indices = np.where(labels == 0)[0]
+    
+    # Sort anomaly scores (descending for top, ascending for bottom)
+    anomaly_scores = scores[anomaly_indices]
+    normal_scores = scores[normal_indices]
+    
+    sorted_anomaly_desc = anomaly_indices[np.argsort(anomaly_scores)[::-1]]  # Top anomalies
+    sorted_anomaly_asc = anomaly_indices[np.argsort(anomaly_scores)]         # Bottom anomalies
+    sorted_normal_desc = normal_indices[np.argsort(normal_scores)[::-1]]     # Top normals
+    
+    def save_samples(indices, category_name, print_title):
+        """Helper function to save a category of samples"""
+        print(f"\n{print_title}:")
+        for i in range(min(save_top_n, len(indices))):
+            idx = indices[i]
+            score = scores[idx]
+            label = labels[idx]
+            path = paths[idx]
+            
+            # Convert tensors to images
+            original = tensor2image(images[idx])
+            recon = tensor2image(reconstructed[idx])
+            diff = tensor2image(difference_maps[idx])
+            
+            # Create visualization
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            
+            # Handle grayscale vs RGB display
+            if opt.model_type == 'gray':
+                # For grayscale, the tensor2image function tiles to 3 channels
+                if len(original.shape) == 3 and original.shape[0] == 3:
+                    orig_gray = original[0]  # Shape: (H, W)
+                    recon_gray = recon[0]    # Shape: (H, W)  
+                    diff_gray = diff[0]      # Shape: (H, W)
+                else:
+                    orig_gray = original.squeeze() if len(original.shape) > 2 else original
+                    recon_gray = recon.squeeze() if len(recon.shape) > 2 else recon
+                    diff_gray = diff.squeeze() if len(diff.shape) > 2 else diff
+                
+                # Crop border regions to match the anomaly score calculation
+                if border_margin > 0:
+                    h, w = orig_gray.shape
+                    if h > 2 * border_margin and w > 2 * border_margin:
+                        orig_gray = orig_gray[border_margin:-border_margin, border_margin:-border_margin]
+                        recon_gray = recon_gray[border_margin:-border_margin, border_margin:-border_margin]
+                        diff_gray = diff_gray[border_margin:-border_margin, border_margin:-border_margin]
+                        
+                axes[0].imshow(orig_gray, cmap='gray')
+                axes[1].imshow(recon_gray, cmap='gray')
+                axes[2].imshow(diff_gray, cmap='hot')
             else:
-                # Handle other cases
-                orig_gray = original.squeeze() if len(original.shape) > 2 else original
-                recon_gray = recon.squeeze() if len(recon.shape) > 2 else recon
-                diff_gray = diff.squeeze() if len(diff.shape) > 2 else diff
+                # For RGB, transpose and display normally
+                orig_rgb = np.transpose(original, (1, 2, 0))
+                recon_rgb = np.transpose(recon, (1, 2, 0))
+                diff_rgb = np.transpose(diff, (1, 2, 0))
+                
+                # Crop border regions to match the anomaly score calculation
+                if border_margin > 0:
+                    h, w = orig_rgb.shape[:2]
+                    if h > 2 * border_margin and w > 2 * border_margin:
+                        orig_rgb = orig_rgb[border_margin:-border_margin, border_margin:-border_margin]
+                        recon_rgb = recon_rgb[border_margin:-border_margin, border_margin:-border_margin]
+                        diff_rgb = diff_rgb[border_margin:-border_margin, border_margin:-border_margin]
+                
+                axes[0].imshow(orig_rgb)
+                axes[1].imshow(recon_rgb)
+                axes[2].imshow(diff_rgb)
+                
+            axes[0].set_title(f'Original (Label: {"Anomaly" if label == 1 else "Normal"})\nCentral Region Only')
+            axes[0].axis('off')
             
-            # Crop border regions to match the anomaly score calculation
-            if border_margin > 0:
-                h, w = orig_gray.shape
-                if h > 2 * border_margin and w > 2 * border_margin:
-                    orig_gray = orig_gray[border_margin:-border_margin, border_margin:-border_margin]
-                    recon_gray = recon_gray[border_margin:-border_margin, border_margin:-border_margin]
-                    diff_gray = diff_gray[border_margin:-border_margin, border_margin:-border_margin]
-                    print(f"  Cropped to central region: {orig_gray.shape}")
-                    
-            axes[0].imshow(orig_gray, cmap='gray')
-            axes[1].imshow(recon_gray, cmap='gray')
-            axes[2].imshow(diff_gray, cmap='hot')  # Use hot colormap for difference
-        else:
-            # For RGB, transpose and display normally
-            orig_rgb = np.transpose(original, (1, 2, 0))
-            recon_rgb = np.transpose(recon, (1, 2, 0))
-            diff_rgb = np.transpose(diff, (1, 2, 0))
+            axes[1].set_title('Reconstructed\nCentral Region Only')
+            axes[1].axis('off')
             
-            # Crop border regions to match the anomaly score calculation
-            if border_margin > 0:
-                h, w = orig_rgb.shape[:2]
-                if h > 2 * border_margin and w > 2 * border_margin:
-                    orig_rgb = orig_rgb[border_margin:-border_margin, border_margin:-border_margin]
-                    recon_rgb = recon_rgb[border_margin:-border_margin, border_margin:-border_margin]
-                    diff_rgb = diff_rgb[border_margin:-border_margin, border_margin:-border_margin]
-                    print(f"  Cropped to central region: {orig_rgb.shape[:2]}")
+            axes[2].set_title(f'Difference (Score: {score:.4f})\nCentral Region Only')
+            axes[2].axis('off')
             
-            axes[0].imshow(orig_rgb)
-            axes[1].imshow(recon_rgb)
-            axes[2].imshow(diff_rgb)
+            plt.tight_layout()
+            filename = f'{category_name}_{i+1}_score_{score:.4f}_label_{label}.png'
+            plt.savefig(f'{output_dir}/{filename}', dpi=150, bbox_inches='tight')
+            plt.close()
             
-        axes[0].set_title(f'Original (Label: {"Anomaly" if label == 1 else "Normal"})\nCentral Region Only')
-        axes[0].axis('off')
-        
-        axes[1].set_title('Reconstructed\nCentral Region Only')
-        axes[1].axis('off')
-        
-        axes[2].set_title(f'Difference (Score: {score:.4f})\nCentral Region Only')
-        axes[2].axis('off')
-        
-        plt.tight_layout()
-        filename = f'top_anomaly_{i+1}_score_{score:.4f}_label_{label}_cropped.png'
-        plt.savefig(f'output/anomaly_detection/{opt.dataset_name}/{filename}', dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"  {i+1}. Score: {score:.4f}, Label: {'Anomaly' if label == 1 else 'Normal'}, File: {os.path.basename(path)}")
+            print(f"  {i+1}. Score: {score:.4f}, Label: {'Anomaly' if label == 1 else 'Normal'}, File: {os.path.basename(path)}")
+    
+    # Save top 5 anomalies (highest scores among anomalies)
+    save_samples(sorted_anomaly_desc, "top_anomaly", f"Top {save_top_n} highest scoring anomalies")
+    
+    # Save top 5 normals (highest scores among normals)
+    save_samples(sorted_normal_desc, "top_normal", f"Top {save_top_n} highest scoring normals")
+    
+    # Save bottom 5 anomalies (lowest scores among anomalies)
+    save_samples(sorted_anomaly_asc, "bottom_anomaly", f"Bottom {save_top_n} lowest scoring anomalies")
 
-def evaluate_performance(scores, labels, threshold=None):
+def evaluate_performance(scores, labels, output_dir, threshold=None):
     """Evaluate anomaly detection performance"""
     
     if threshold is None:
@@ -227,7 +273,7 @@ def evaluate_performance(scores, labels, threshold=None):
     plt.title('ROC Curve for Anomaly Detection')
     plt.legend()
     plt.grid(True)
-    plt.savefig(f'output/anomaly_detection/{opt.dataset_name}/roc_curve.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'{output_dir}/roc_curve.png', dpi=150, bbox_inches='tight')
     plt.close()
     
     # Plot score distribution
@@ -243,7 +289,7 @@ def evaluate_performance(scores, labels, threshold=None):
     plt.title('Distribution of Anomaly Scores')
     plt.legend()
     plt.grid(True)
-    plt.savefig(f'output/anomaly_detection/{opt.dataset_name}/score_distribution.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'{output_dir}/score_distribution.png', dpi=150, bbox_inches='tight')
     plt.close()
     
     return threshold, auc_score, report
@@ -302,11 +348,11 @@ print(f"Normal images: {np.sum(all_labels == 0)}")
 print(f"Anomalous images: {np.sum(all_labels == 1)}")
 
 # Evaluate performance
-threshold, auc_score, report = evaluate_performance(all_scores, all_labels, opt.threshold)
+threshold, auc_score, report = evaluate_performance(all_scores, all_labels, output_dir, opt.threshold)
 
 # Visualize results with border cropping
 visualize_results(all_images, all_reconstructed, all_difference_maps, 
-                 all_scores, all_labels, all_paths, border_margin=opt.border_margin, save_top_n=15)
+                 all_scores, all_labels, all_paths, output_dir, border_margin=opt.border_margin, save_top_n=5)
 
 # Save detailed results
 results_df = pd.DataFrame({
@@ -316,11 +362,13 @@ results_df = pd.DataFrame({
     'predicted_label': (all_scores > threshold).astype(int)
 })
 
-results_df.to_csv(f'output/anomaly_detection/{opt.dataset_name}/detailed_results.csv', index=False)
+results_df.to_csv(f'{output_dir}/detailed_results.csv', index=False)
 
-print(f"\nResults saved to output/anomaly_detection/{opt.dataset_name}/")
+print(f"\nResults saved to {output_dir}/")
 print("Files created:")
 print("  - detailed_results.csv: Detailed results for each image")
 print("  - roc_curve.png: ROC curve plot")
 print("  - score_distribution.png: Distribution of anomaly scores")
-print("  - top_anomaly_*.png: Visualizations of highest scoring samples")
+print("  - top_anomaly_*.png: Top 5 highest scoring anomalies")
+print("  - top_normal_*.png: Top 5 highest scoring normals") 
+print("  - bottom_anomaly_*.png: Bottom 5 lowest scoring anomalies")

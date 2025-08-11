@@ -3,6 +3,9 @@
 Grayscale anomaly detection training script.
 This version uses single-channel grayscale images for better efficiency and medical imaging standards.
 """
+# python train_anomaly.py --dataset_name datasets/original --n_epochs 5 --checkpoint_interval 1 --batch_size 9
+# python train_anomaly.py --dataset_name datasets/preprocessed --n_epochs 5 --checkpoint_interval 1 --batch_size 9
+# python train_anomaly.py --dataset_name datasets/preprocessed_resized --n_epochs 5 --checkpoint_interval 1 --batch_size 9
 
 import argparse
 import os
@@ -10,6 +13,7 @@ import numpy as np
 import datetime
 import time
 import sys
+from tqdm import tqdm
 
 import torchvision.transforms as transforms
 from torchvision.utils import save_image, make_grid
@@ -52,16 +56,16 @@ def main():
     parser.add_argument('--epoch', type=int, default=0, help='epoch to start training from')
     parser.add_argument('--n_epochs', type=int, default=50, help='number of epochs of training')
     parser.add_argument('--dataset_name', type=str, default='OCT2017', help='name of the dataset')
-    parser.add_argument('--batch_size', type=int, default=4, help='size of the batches')
+    parser.add_argument('--batch_size', type=int, default=8, help='size of the batches')
     parser.add_argument('--lr', type=float, default=0.0002, help='adam: learning rate')
     parser.add_argument('--b1', type=float, default=0.5, help='adam: decay of first order momentum of gradient')
     parser.add_argument('--b2', type=float, default=0.999, help='adam: decay of first order momentum of gradient')
-    parser.add_argument('--decay_epoch', type=int, default=25, help='epoch from which to start lr decay')
-    parser.add_argument('--img_height', type=int, default=256, help='size of image height')
-    parser.add_argument('--img_width', type=int, default=256, help='size of image width')
+    parser.add_argument('--decay_epoch', type=int, default=2, help='epoch from which to start lr decay')
+    parser.add_argument('--img_height', type=int, default=-1, help='size of image height')
+    parser.add_argument('--img_width', type=int, default=-1, help='size of image width')
     parser.add_argument('--channels', type=int, default=1, help='number of image channels (1 for grayscale)')
-    parser.add_argument('--sample_interval', type=int, default=500, help='interval between saving generator outputs')
-    parser.add_argument('--checkpoint_interval', type=int, default=5, help='interval between saving model checkpoints')
+    parser.add_argument('--sample_interval', type=int, default=100, help='interval between saving generator outputs')
+    parser.add_argument('--checkpoint_interval', type=int, default=1, help='interval between saving model checkpoints')
     parser.add_argument('--n_residual_blocks', type=int, default=9, help='number of residual blocks in generator')
     parser.add_argument('--lambda_cyc', type=float, default=10.0, help='cycle loss weight')
     parser.add_argument('--lambda_id', type=float, default=5.0, help='identity loss weight')
@@ -141,13 +145,18 @@ def main():
     # Buffers of previously generated samples
     fake_buffer = ReplayBuffer()
 
-    # Image transformations for grayscale
-    transforms_ = [
-        transforms.Resize((opt.img_height, opt.img_width)), 
-        transforms.Grayscale(num_output_channels=1),  # Ensure single channel
+    # Modified transforms for original size preservation
+    transforms_ = []
+
+    # Only resize if dimensions are specified and different from a "preserve" flag
+    if opt.img_height != -1 and opt.img_width != -1:  # Could add -1 as "preserve original"
+        transforms_.append(transforms.Resize((opt.img_height, opt.img_width)))
+
+    transforms_.extend([
+        transforms.Grayscale(num_output_channels=1),
         transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))  # Single channel normalization
-    ]
+        transforms.Normalize((0.5,), (0.5,))
+    ])
 
     # Training data loader (only normal images)
     print("Loading grayscale training dataset...")
@@ -169,7 +178,6 @@ def main():
 
     print(f"Training dataset size: {len(dataloader)} batches")
     print(f"Validation dataset size: {len(val_dataloader)} batches")
-    print(f"Memory usage: ~{opt.batch_size * opt.img_height * opt.img_width * 1 * 4 / 1024 / 1024:.1f} MB per batch (grayscale)")
 
     # ----------
     #  Training
@@ -178,12 +186,18 @@ def main():
     print("\nStarting grayscale training...")
     total_start_time = time.time()
     
-    for epoch in range(opt.epoch, opt.n_epochs):
+    # Create epoch progress bar
+    epoch_pbar = tqdm(range(opt.epoch, opt.n_epochs), desc="Training Epochs", position=0)
+    
+    for epoch in epoch_pbar:
         epoch_start_time = time.time()
         epoch_loss_G = 0.0
         epoch_loss_D = 0.0
         
-        for i, batch in enumerate(dataloader):
+        # Create batch progress bar for this epoch
+        batch_pbar = tqdm(dataloader, desc=f"Epoch {epoch}", position=1, leave=False)
+        
+        for i, batch in enumerate(batch_pbar):
             # Set model input (normal images as both A and B)
             real_A = Variable(batch['A']).to(device)
             real_B = Variable(batch['B']).to(device)
@@ -238,17 +252,28 @@ def main():
             epoch_loss_G += loss_G.item()
             epoch_loss_D += loss_D.item()
 
-            # Print progress
-            if i % 100 == 0:
-                print(f"[Epoch {epoch}/{opt.n_epochs}] [Batch {i}/{len(dataloader)}] "
-                      f"[D loss: {loss_D.item():.6f}] [G loss: {loss_G.item():.6f}] "
-                      f"[Identity: {loss_id.item():.6f}] [Cycle: {loss_cycle.item():.6f}]")
+            # Update batch progress bar with current losses
+            batch_pbar.set_postfix({
+                'D_loss': f'{loss_D.item():.4f}',
+                'G_loss': f'{loss_G.item():.4f}',
+                'Identity': f'{loss_id.item():.4f}',
+                'Cycle': f'{loss_cycle.item():.4f}'
+            })
+
+            # Print detailed progress less frequently
+            if i % 500 == 0:
+                tqdm.write(f"[Epoch {epoch}/{opt.n_epochs}] [Batch {i}/{len(dataloader)}] "
+                          f"[D loss: {loss_D.item():.6f}] [G loss: {loss_G.item():.6f}] "
+                          f"[Identity: {loss_id.item():.6f}] [Cycle: {loss_cycle.item():.6f}]")
 
             # Save sample images
             batches_done = epoch * len(dataloader) + i
             if batches_done % opt.sample_interval == 0:
                 sample_images(anomaly_detector, val_dataloader, opt.dataset_name, batches_done, device)
 
+        # Close batch progress bar
+        batch_pbar.close()
+        
         # Update learning rates
         lr_scheduler_G.step()
         lr_scheduler_D.step()
@@ -258,17 +283,25 @@ def main():
         avg_loss_G = epoch_loss_G / len(dataloader)
         avg_loss_D = epoch_loss_D / len(dataloader)
         
-        print(f"\nEpoch {epoch} Summary:")
-        print(f"  Time: {epoch_time:.2f}s")
-        print(f"  Avg Generator Loss: {avg_loss_G:.6f}")
-        print(f"  Avg Discriminator Loss: {avg_loss_D:.6f}")
-        print(f"  Learning Rate: {lr_scheduler_G.get_last_lr()[0]:.8f}")
+        # Update epoch progress bar with summary
+        epoch_pbar.set_postfix({
+            'Avg_G': f'{avg_loss_G:.4f}',
+            'Avg_D': f'{avg_loss_D:.4f}',
+            'Time': f'{epoch_time:.1f}s',
+            'LR': f'{lr_scheduler_G.get_last_lr()[0]:.2e}'
+        })
+        
+        tqdm.write(f"Epoch {epoch} Summary: Time: {epoch_time:.2f}s, "
+                  f"Avg G Loss: {avg_loss_G:.6f}, Avg D Loss: {avg_loss_D:.6f}")
 
         # Save model checkpoints
         if opt.checkpoint_interval != -1 and epoch % opt.checkpoint_interval == 0:
             model_path = f'saved_models/{opt.dataset_name}/anomaly_detector_gray_{epoch}.pth'
             torch.save(anomaly_detector.state_dict(), model_path)
-            print(f"  Grayscale model checkpoint saved: {model_path}")
+            tqdm.write(f"Model checkpoint saved: {model_path}")
+
+    # Close epoch progress bar
+    epoch_pbar.close()
 
     total_time = time.time() - total_start_time
     print(f"\nGrayscale training completed in {total_time:.2f}s ({total_time/3600:.2f}h)")
