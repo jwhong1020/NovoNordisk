@@ -57,8 +57,14 @@ def test_disease_class(anomaly_detector, dataset_name, disease_class, opt):
             labels = batch['label'].numpy()
             paths = batch['path']
             
-            # Detect anomalies
-            results = anomaly_detector.detect_anomalies(real_images, border_margin=opt.border_margin)
+            # Detect anomalies with concentration penalty
+            results = anomaly_detector.detect_anomalies(
+                real_images, 
+                border_margin=opt.border_margin,
+                use_concentration=opt.use_concentration,
+                concentration_weight=opt.concentration_weight,
+                concentration_method=opt.concentration_method
+            )
             scores = results['anomaly_scores'].cpu().numpy()
             
             all_scores.extend(scores)
@@ -197,6 +203,9 @@ if __name__ == '__main__':
     parser.add_argument('--model_epoch', type=int, default=1, help='epoch of trained model to load')
     parser.add_argument('--n_cpu', type=int, default=0, help='number of cpu threads to use during batch generation')
     parser.add_argument('--border_margin', type=int, default=16, help='number of pixels to exclude from borders')
+    parser.add_argument('--use_concentration', type=bool, default=True, help='whether to apply concentration penalty')
+    parser.add_argument('--concentration_weight', type=float, default=2.0, help='weight for concentration penalty')
+    parser.add_argument('--concentration_method', type=str, default='centroid', choices=['centroid', 'patch'], help='concentration method')
     parser.add_argument('--disease_classes', type=str, nargs='+', default=['CNV', 'DME', 'DRUSEN'], 
                         help='disease classes to test (default: CNV DME DRUSEN)')
     opt = parser.parse_args()

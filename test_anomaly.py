@@ -32,6 +32,9 @@ if __name__ == '__main__':
     parser.add_argument('--n_cpu', type=int, default=0, help='number of cpu threads to use during batch generation')
     parser.add_argument('--model_type', type=str, default='rgb', choices=['rgb', 'gray'], help='model type (rgb or grayscale)')
     parser.add_argument('--border_margin', type=int, default=16, help='number of pixels to exclude from borders when calculating anomaly score')
+    parser.add_argument('--use_concentration', type=bool, default=True, help='whether to apply concentration penalty for clustered anomalies')
+    parser.add_argument('--concentration_weight', type=float, default=2.0, help='weight for concentration penalty (higher = more penalty for concentration)')
+    parser.add_argument('--concentration_method', type=str, default='centroid', choices=['centroid', 'patch'], help='method for computing concentration penalty')
     opt = parser.parse_args()
     print(opt)
 
@@ -265,8 +268,15 @@ with torch.no_grad():
         labels = batch['label'].numpy()
         paths = batch['path']
         
-        # Detect anomalies (excluding border regions)
-        results = anomaly_detector.detect_anomalies(real_images, border_margin=opt.border_margin)
+        # Detect anomalies with concentration penalty
+        results = anomaly_detector.detect_anomalies(
+            real_images, 
+            border_margin=opt.border_margin,
+            method=opt.score_method,
+            use_concentration=opt.use_concentration,
+            concentration_weight=opt.concentration_weight,
+            concentration_method=opt.concentration_method
+        )
         
         # Store results
         scores = results['anomaly_scores'].cpu().numpy()
