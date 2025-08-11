@@ -3,9 +3,9 @@
 Grayscale anomaly detection training script.
 This version uses single-channel grayscale images for better efficiency and medical imaging standards.
 """
-# python train_anomaly.py --dataset_name datasets/original --n_epochs 5 --checkpoint_interval 1 --batch_size 9
-# python train_anomaly.py --dataset_name datasets/preprocessed --n_epochs 5 --checkpoint_interval 1 --batch_size 9
-# python train_anomaly.py --dataset_name datasets/preprocessed_resized --n_epochs 5 --checkpoint_interval 1 --batch_size 9
+# python train_anomaly.py --dataset_name datasets/original --n_epochs 5 --checkpoint_interval 1 --batch_size 9  --img_height 256 --img_width 256
+# python train_anomaly.py --dataset_name datasets/preprocessed_256 --n_epochs 5 --checkpoint_interval 1 --batch_size 9
+# python train_anomaly.py --dataset_name datasets/preprocessed_128 --n_epochs 5 --checkpoint_interval 1 --batch_size 36
 
 import argparse
 import os
