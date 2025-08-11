@@ -20,7 +20,8 @@ from anomaly_models import AnomalyDetector
 from anomaly_datasets import AnomalyDataset
 from utils import tensor2image
 
-# python test_anomaly.py --dataset_name datasets/preprocessed_resized --model_epoch 4 --model_type gray --border_margin 16
+# Example usage:
+# python test_anomaly.py --dataset_name datasets/preprocessed_resized --model_epoch 1 --model_type gray --border_margin 16 --balance_dataset
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -39,6 +40,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_concentration', type=bool, default=True, help='whether to apply concentration penalty for clustered anomalies')
     parser.add_argument('--concentration_weight', type=float, default=2.0, help='weight for concentration penalty (higher = more penalty for concentration)')
     parser.add_argument('--concentration_method', type=str, default='centroid', choices=['centroid', 'patch'], help='method for computing concentration penalty')
+    parser.add_argument('--balance_dataset', action='store_true', help='balance the test dataset by sampling equal numbers from normal and abnormal classes')
     opt = parser.parse_args()
     print(opt)
 
@@ -122,7 +124,8 @@ if opt.model_type == 'gray':
     dataset = AnomalyDatasetGrayscale(
         normal_dir=f"{opt.dataset_name}/test/NORMAL",
         abnormal_dir=f"{opt.dataset_name}/test/CNV", 
-        transform=transforms.Compose(transforms_)
+        transform=transforms.Compose(transforms_),
+        balance_dataset=opt.balance_dataset
     )
     dataloader = DataLoader(dataset, batch_size=opt.batch_size, shuffle=False, num_workers=opt.n_cpu)
 else:

@@ -115,7 +115,7 @@ class AnomalyDatasetGrayscale(Dataset):
     Contains both normal and abnormal images with labels.
     """
     
-    def __init__(self, normal_dir, abnormal_dir, transform=None):
+    def __init__(self, normal_dir, abnormal_dir, transform=None, balance_dataset=False):
         self.transform = transform
         
         # Get all normal images
@@ -127,6 +127,19 @@ class AnomalyDatasetGrayscale(Dataset):
         abnormal_files = []
         for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
             abnormal_files.extend(glob.glob(os.path.join(abnormal_dir, ext)))
+        
+        if balance_dataset and len(normal_files) != len(abnormal_files):
+            # Balance the dataset by sampling equal numbers from both classes
+            min_samples = min(len(normal_files), len(abnormal_files))
+            
+            # Randomly sample from the larger class
+            random.seed(42)  # For reproducibility
+            if len(normal_files) > min_samples:
+                normal_files = random.sample(normal_files, min_samples)
+            if len(abnormal_files) > min_samples:
+                abnormal_files = random.sample(abnormal_files, min_samples)
+            
+            print(f"Dataset balanced: Using {min_samples} samples from each class")
         
         # Combine files and create labels
         self.files = normal_files + abnormal_files
