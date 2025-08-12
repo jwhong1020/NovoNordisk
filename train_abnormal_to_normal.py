@@ -13,6 +13,9 @@ import numpy as np
 import itertools
 from tqdm import tqdm
 import time
+import json
+import csv
+from datetime import datetime
 
 import torchvision.transforms as transforms
 from torchvision.utils import save_image, make_grid
@@ -79,6 +82,47 @@ def sample_images(model, normal_loader, abnormal_loader, dataset_name, batches_d
     
     model.train()
 
+def save_training_metrics(epoch_data, dataset_name):
+    """Append training metrics for one epoch to CSV file"""
+    try:
+        # Create output directory
+        history_dir = f'saved_models/{dataset_name}/training_history'
+        os.makedirs(history_dir, exist_ok=True)
+        
+        # Single CSV file for all training metrics
+        csv_filename = f'{history_dir}/training_metrics.csv'
+        
+        # Prepare row data
+        row = {
+            'epoch': epoch_data['epoch'],
+            'avg_generator_loss': epoch_data['avg_generator_loss'],
+            'avg_discriminator_loss': epoch_data['avg_discriminator_loss'],
+            'avg_identity_loss': epoch_data['avg_identity_loss'],
+            'avg_healing_loss': epoch_data['avg_healing_loss'],
+            'avg_adversarial_loss': epoch_data['avg_adversarial_loss'],
+            'avg_segmentation_loss': epoch_data['avg_segmentation_loss'],
+            'avg_perceptual_loss': epoch_data['avg_perceptual_loss'],
+            'epoch_time': epoch_data['epoch_time'],
+            'generator_lr': epoch_data['generator_lr'],
+            'discriminator_lr': epoch_data['discriminator_lr']
+        }
+        
+        # Check if file exists to determine if we need to write header
+        file_exists = os.path.exists(csv_filename)
+        
+        # Append to CSV
+        with open(csv_filename, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+        
+        return csv_filename
+        
+    except Exception as e:
+        print(f"Warning: Could not save training metrics: {e}")
+        return None
+
 def create_balanced_dataloaders(normal_dataset, abnormal_dataset, batch_size, n_cpu):
     """Create balanced dataloaders that have the same number of batches"""
     
@@ -118,6 +162,7 @@ def main():
     parser.add_argument('--checkpoint_interval', type=int, default=1, help='interval between saving model checkpoints')
     parser.add_argument('--n_residual_blocks', type=int, default=9, help='number of residual blocks in generator')
     parser.add_argument('--n_cpu', type=int, default=0, help='number of cpu threads to use during batch generation')
+    parser.add_argument('--save_losses', action='store_true', help='save training losses and metrics to files')
     
     # Loss weights
     parser.add_argument('--lambda_identity', type=float, default=10.0, help='identity loss weight')
@@ -247,6 +292,15 @@ def main():
         epoch_loss_G = 0.0
         epoch_loss_D = 0.0
         
+        # Initialize detailed loss tracking for this epoch
+        epoch_losses = {
+            'identity_losses': [],
+            'healing_losses': [],
+            'adversarial_losses': [],
+            'segmentation_losses': [],
+            'perceptual_losses': []
+        }
+        
         # Create batch progress bar for this epoch
         batch_pbar = tqdm(zip(normal_dataloader, abnormal_dataloader), 
                          desc=f"Epoch {epoch}", position=1, leave=False,
@@ -312,6 +366,14 @@ def main():
             # Accumulate losses
             epoch_loss_G += loss_G.item()
             epoch_loss_D += loss_D.item()
+            
+            # Track detailed losses for history
+            if opt.save_losses:
+                epoch_losses['identity_losses'].append(loss_components['identity_loss'].item())
+                epoch_losses['healing_losses'].append(loss_components['healing_loss'].item())
+                epoch_losses['adversarial_losses'].append(loss_components['adversarial_loss'].item())
+                epoch_losses['segmentation_losses'].append(loss_components['segmentation_loss'].item())
+                epoch_losses['perceptual_losses'].append(loss_components['perceptual_loss'].item())
 
             # Update batch progress bar
             batch_pbar.set_postfix({
@@ -339,6 +401,32 @@ def main():
         avg_loss_G = epoch_loss_G / min(len(normal_dataloader), len(abnormal_dataloader))
         avg_loss_D = epoch_loss_D / min(len(normal_dataloader), len(abnormal_dataloader))
         
+        # Calculate average detailed losses for this epoch
+        avg_detailed_losses = {}
+        if opt.save_losses and epoch_losses['identity_losses']:
+            avg_detailed_losses = {
+                'avg_identity_loss': np.mean(epoch_losses['identity_losses']),
+                'avg_healing_loss': np.mean(epoch_losses['healing_losses']),
+                'avg_adversarial_loss': np.mean(epoch_losses['adversarial_losses']),
+                'avg_segmentation_loss': np.mean(epoch_losses['segmentation_losses']),
+                'avg_perceptual_loss': np.mean(epoch_losses['perceptual_losses'])
+            }
+        
+        # Save epoch data to training metrics
+        if opt.save_losses:
+            epoch_data = {
+                'epoch': epoch,
+                'epoch_time': epoch_time,
+                'avg_generator_loss': avg_loss_G,
+                'avg_discriminator_loss': avg_loss_D,
+                'generator_lr': lr_scheduler_G.get_last_lr()[0],
+                'discriminator_lr': lr_scheduler_D.get_last_lr()[0],
+                **avg_detailed_losses
+            }
+            csv_file = save_training_metrics(epoch_data, opt.dataset_name)
+            if csv_file and epoch % 10 == 0:  # Print confirmation every 10 epochs
+                tqdm.write(f"Training metrics saved to: {csv_file}")
+        
         # Update epoch progress bar
         epoch_pbar.set_postfix({
             'Avg_G': f'{avg_loss_G:.4f}',
@@ -360,7 +448,15 @@ def main():
     epoch_pbar.close()
 
     total_time = time.time() - total_start_time
+    
     print(f"\nAbnormal-to-Normal training completed in {total_time:.2f}s ({total_time/3600:.2f}h)")
+    
+    if opt.save_losses:
+        csv_file = f'saved_models/{opt.dataset_name}/training_history/training_metrics.csv'
+        if os.path.exists(csv_file):
+            print(f"Training metrics saved to: {csv_file}")
+            print(f"Use plot_training_history.py to visualize the results:")
+            print(f"  python plot_training_history.py --csv_file {csv_file}")
 
 if __name__ == '__main__':
     main()
