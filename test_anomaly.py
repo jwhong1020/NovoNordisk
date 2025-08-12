@@ -21,7 +21,7 @@ from anomaly_datasets import AnomalyDataset
 from utils import tensor2image
 
 # Example usage:
-# python test_anomaly.py --dataset_name datasets/preprocessed_resized --model_epoch 1 --model_type gray --border_margin 16 --balance_dataset
+# python test_anomaly.py --dataset_name datasets/preprocessed_256 --model_epoch 1 --model_type gray --border_margin 16 --balance_dataset
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

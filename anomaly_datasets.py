@@ -115,37 +115,57 @@ class AnomalyDatasetGrayscale(Dataset):
     Contains both normal and abnormal images with labels.
     """
     
-    def __init__(self, normal_dir, abnormal_dir, transform=None, balance_dataset=False):
+    def __init__(self, normal_dir, abnormal_dir, transform=None, balance_dataset=False, mode='both'):
+        """
+        Args:
+            normal_dir: Directory containing normal images
+            abnormal_dir: Directory containing abnormal images
+            transform: Transform to apply to images
+            balance_dataset: Whether to balance the dataset
+            mode: 'both', 'normal_only', or 'abnormal_only'
+        """
         self.transform = transform
+        self.mode = mode
         
         # Get all normal images
         normal_files = []
-        for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
-            normal_files.extend(glob.glob(os.path.join(normal_dir, ext)))
+        if mode in ['both', 'normal_only']:
+            for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+                normal_files.extend(glob.glob(os.path.join(normal_dir, ext)))
         
         # Get all abnormal images  
         abnormal_files = []
-        for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
-            abnormal_files.extend(glob.glob(os.path.join(abnormal_dir, ext)))
+        if mode in ['both', 'abnormal_only']:
+            for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+                abnormal_files.extend(glob.glob(os.path.join(abnormal_dir, ext)))
         
-        if balance_dataset and len(normal_files) != len(abnormal_files):
-            # Balance the dataset by sampling equal numbers from both classes
-            min_samples = min(len(normal_files), len(abnormal_files))
+        if mode == 'normal_only':
+            self.files = normal_files
+            self.labels = [0] * len(normal_files)
+            print(f"Loaded {len(normal_files)} normal grayscale images only")
+        elif mode == 'abnormal_only':
+            self.files = abnormal_files
+            self.labels = [1] * len(abnormal_files)
+            print(f"Loaded {len(abnormal_files)} abnormal grayscale images only")
+        else:  # mode == 'both'
+            if balance_dataset and len(normal_files) != len(abnormal_files):
+                # Balance the dataset by sampling equal numbers from both classes
+                min_samples = min(len(normal_files), len(abnormal_files))
+                
+                # Randomly sample from the larger class
+                random.seed(42)  # For reproducibility
+                if len(normal_files) > min_samples:
+                    normal_files = random.sample(normal_files, min_samples)
+                if len(abnormal_files) > min_samples:
+                    abnormal_files = random.sample(abnormal_files, min_samples)
+                
+                print(f"Dataset balanced: Using {min_samples} samples from each class")
             
-            # Randomly sample from the larger class
-            random.seed(42)  # For reproducibility
-            if len(normal_files) > min_samples:
-                normal_files = random.sample(normal_files, min_samples)
-            if len(abnormal_files) > min_samples:
-                abnormal_files = random.sample(abnormal_files, min_samples)
+            # Combine files and create labels
+            self.files = normal_files + abnormal_files
+            self.labels = [0] * len(normal_files) + [1] * len(abnormal_files)  # 0=normal, 1=abnormal
             
-            print(f"Dataset balanced: Using {min_samples} samples from each class")
-        
-        # Combine files and create labels
-        self.files = normal_files + abnormal_files
-        self.labels = [0] * len(normal_files) + [1] * len(abnormal_files)  # 0=normal, 1=abnormal
-        
-        print(f"Loaded {len(normal_files)} normal and {len(abnormal_files)} abnormal grayscale images")
+            print(f"Loaded {len(normal_files)} normal and {len(abnormal_files)} abnormal grayscale images")
     
     def __getitem__(self, index):
         image_path = self.files[index]
