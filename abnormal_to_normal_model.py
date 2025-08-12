@@ -65,7 +65,6 @@ class AbnormalToNormalDetector(nn.Module):
             
             # Skip if difference map is essentially zero
             if diff_np.max() <= 1e-6:
-                print(f"Batch {i}: Skipping - difference map is essentially zero")
                 continue
             
             # Calculate base threshold
@@ -123,16 +122,8 @@ class AbnormalToNormalDetector(nn.Module):
             if min_cluster_size > 0:
                 binary_mask = self.remove_small_components_cv2(binary_mask, min_cluster_size)
             
-            # Debug print
-            print(f"Batch {i}: Diff range: [{diff_np.min():.6f}, {diff_np.max():.6f}], Threshold: {threshold_val:.6f} (adaptive: {adaptive_threshold})")
-            white_pixels = np.sum(binary_mask)
-            total_pixels = binary_mask.size
-            percentage = white_pixels/total_pixels*100 if total_pixels > 0 else 0
-            print(f"Batch {i}: Mask has {int(white_pixels)} white pixels out of {total_pixels} total ({percentage:.1f}%)")
-            
             # Skip if no pixels survive the threshold after filtering
             if binary_mask.sum() == 0:
-                print(f"Batch {i}: Skipping mask - no pixels above threshold after filtering")
                 continue
             
             # Convert back to tensor (keep as 0-1 values)

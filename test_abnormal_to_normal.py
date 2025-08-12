@@ -180,13 +180,6 @@ if __name__ == '__main__':
                 diff = tensor2image(difference_maps[idx])
                 seg_mask = mask2image(segmentation_masks[idx])  # Use special mask converter
                 
-                # DEBUG: Print mask tensor info before conversion
-                print(f"DEBUG - Image {idx}: Mask tensor shape: {segmentation_masks[idx].shape}")
-                print(f"DEBUG - Image {idx}: Mask tensor range: [{segmentation_masks[idx].min():.4f}, {segmentation_masks[idx].max():.4f}]")
-                print(f"DEBUG - Image {idx}: Mask tensor mean: {segmentation_masks[idx].mean():.4f}")
-                print(f"DEBUG - Image {idx}: After mask2image, seg_mask shape: {seg_mask.shape}")
-                print(f"DEBUG - Image {idx}: After mask2image, seg_mask range: [{seg_mask.min():.4f}, {seg_mask.max():.4f}]")
-                
                 # Create visualization with 5 subplots: Original, Healed, Difference, Segmentation, Overlay
                 fig, axes = plt.subplots(1, 5, figsize=(20, 4))
                 
