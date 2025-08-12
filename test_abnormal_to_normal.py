@@ -90,7 +90,16 @@ if __name__ == '__main__':
     model_path = f'saved_models/{opt.dataset_name}/abnormal_to_normal_{opt.model_epoch}.pth'
 
     if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        # Load model weights (ignore segmentation head if present)
+        checkpoint = torch.load(model_path, map_location=device)
+        
+        # Filter out segmentation head parameters if they exist
+        filtered_checkpoint = {}
+        for key, value in checkpoint.items():
+            if not key.startswith('segmentation_head'):
+                filtered_checkpoint[key] = value
+        
+        model.load_state_dict(filtered_checkpoint, strict=False)
         print(f"Loaded model from {model_path}")
     else:
         print(f"Error: Model not found at {model_path}")
@@ -132,6 +141,14 @@ if __name__ == '__main__':
                                  scores, labels, paths, output_dir, save_top_n=5):
         """Visualize healing results with segmentation"""
         
+        def mask2image(tensor):
+            """Convert mask tensor (0-1 range) to image (0-255 range)"""
+            mask = tensor[0].cpu().float().numpy()  # Get first channel
+            mask = (mask * 255).astype(np.uint8)  # Convert 0-1 to 0-255
+            if mask.ndim == 2:  # If 2D, make it 3D for consistency
+                mask = np.expand_dims(mask, axis=0)
+            return mask
+        
         # Convert to numpy arrays for easier indexing
         scores = np.array(scores)
         labels = np.array(labels)
@@ -161,7 +178,14 @@ if __name__ == '__main__':
                 original = tensor2image(images[idx])
                 healed = tensor2image(healed_images[idx])
                 diff = tensor2image(difference_maps[idx])
-                seg_mask = tensor2image(segmentation_masks[idx])
+                seg_mask = mask2image(segmentation_masks[idx])  # Use special mask converter
+                
+                # DEBUG: Print mask tensor info before conversion
+                print(f"DEBUG - Image {idx}: Mask tensor shape: {segmentation_masks[idx].shape}")
+                print(f"DEBUG - Image {idx}: Mask tensor range: [{segmentation_masks[idx].min():.4f}, {segmentation_masks[idx].max():.4f}]")
+                print(f"DEBUG - Image {idx}: Mask tensor mean: {segmentation_masks[idx].mean():.4f}")
+                print(f"DEBUG - Image {idx}: After mask2image, seg_mask shape: {seg_mask.shape}")
+                print(f"DEBUG - Image {idx}: After mask2image, seg_mask range: [{seg_mask.min():.4f}, {seg_mask.max():.4f}]")
                 
                 # Create visualization with 5 subplots: Original, Healed, Difference, Segmentation, Overlay
                 fig, axes = plt.subplots(1, 5, figsize=(20, 4))
@@ -208,18 +232,28 @@ if __name__ == '__main__':
                 axes[2].set_title(f'Healing Difference\n(Score: {score:.4f})')
                 axes[2].axis('off')
                 
-                axes[3].imshow(seg_gray, cmap='hot')
-                axes[3].set_title('Segmentation Mask')
+                axes[3].imshow(seg_gray, cmap='hot', vmin=0, vmax=1)
+                axes[3].set_title(f'Segmentation Mask\n(Max: {seg_gray.max():.4f}, Mean: {seg_gray.mean():.4f})')
                 axes[3].axis('off')
                 
-                # Overlay segmentation on original
+                # Overlay segmentation on original - use simple threshold for binary mask
                 overlay = orig_gray.copy()
-                seg_threshold = 0.5
+                if seg_gray.max() > 0:
+                    seg_threshold = 0.5  # Simple threshold since mask is already binary (0 or 1)
+                else:
+                    seg_threshold = 0.5
+                    
                 seg_binary = seg_gray > seg_threshold
                 overlay = np.stack([overlay, overlay, overlay], axis=-1)  # Convert to RGB
-                overlay[seg_binary, 0] = 1.0  # Red overlay for segmented regions
+                
+                # Apply different colors based on label
+                if label == 1:  # Anomaly
+                    overlay[seg_binary, 0] = 1.0  # Red overlay for segmented regions
+                else:  # Normal
+                    overlay[seg_binary, 2] = 1.0  # Blue overlay (should be minimal)
+                
                 axes[4].imshow(overlay)
-                axes[4].set_title('Segmentation Overlay')
+                axes[4].set_title(f'Segmentation Overlay\n(Threshold: {seg_threshold:.4f})')
                 axes[4].axis('off')
                 
                 plt.tight_layout()

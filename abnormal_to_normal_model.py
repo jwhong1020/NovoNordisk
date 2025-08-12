@@ -12,6 +12,8 @@ Training Strategy:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import cv2
+import numpy as np
 from models import Generator, Discriminator
 
 class AbnormalToNormalDetector(nn.Module):
@@ -27,25 +29,144 @@ class AbnormalToNormalDetector(nn.Module):
         
         # Discriminator: Ensures healed images look realistic and normal
         self.discriminator = Discriminator(output_nc)
-        
-        # Segmentation head for direct abnormality localization
-        self.segmentation_head = nn.Sequential(
-            nn.Conv2d(input_nc + output_nc, 64, 3, 1, 1),  # Concat input + output
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 32, 3, 1, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 1, 1, 1, 0),
-            nn.Sigmoid()  # Output segmentation mask
-        )
     
     def forward(self, x):
         """Forward pass returns healed image"""
         return self.healing_generator(x)
     
-    def get_segmentation_mask(self, input_img, healed_img):
-        """Generate segmentation mask from input and healed images"""
-        combined = torch.cat([input_img, healed_img], dim=1)
-        return self.segmentation_head(combined)
+    def get_segmentation_mask(self, input_img, healed_img, anomaly_score=None, base_threshold_percentile=85, 
+                             min_cluster_size=20, max_threshold_multiplier=2.0, adaptive_threshold=True):
+        """
+        Generate segmentation mask from difference map using adaptive thresholding and noise removal.
+        
+        Args:
+            input_img: Original input image
+            healed_img: Healed output image  
+            anomaly_score: Anomaly score for the image (if Normal, return empty mask)
+            base_threshold_percentile: Starting percentile for threshold (default 85)
+            min_cluster_size: Minimum size of connected components to keep
+            max_threshold_multiplier: Maximum factor to multiply base threshold
+            adaptive_threshold: Whether to use adaptive thresholding based on distribution
+        """
+        batch_size = input_img.shape[0]
+        device = input_img.device
+        h, w = input_img.shape[-2], input_img.shape[-1]
+        
+        # Initialize output masks
+        segmentation_masks = torch.zeros(batch_size, 1, h, w, device=device)
+        
+        # Compute difference map
+        diff_map = torch.abs(input_img - healed_img)
+        
+        # Process each image in the batch
+        for i in range(batch_size):
+            # Convert to numpy for processing
+            diff_np = diff_map[i, 0].cpu().numpy()
+            
+            # Skip if difference map is essentially zero
+            if diff_np.max() <= 1e-6:
+                print(f"Batch {i}: Skipping - difference map is essentially zero")
+                continue
+            
+            # Calculate base threshold
+            base_threshold = np.percentile(diff_np, base_threshold_percentile)
+            
+            if adaptive_threshold:
+                # Analyze the distribution to determine if there are clear anomalies
+                diff_values = diff_np.flatten()
+                
+                # Calculate statistics
+                mean_val = np.mean(diff_values)
+                std_val = np.std(diff_values)
+                
+                # Use Otsu-like approach: find threshold that maximizes between-class variance
+                max_threshold = base_threshold * max_threshold_multiplier
+                n_thresholds = 20
+                thresholds = np.linspace(base_threshold, max_threshold, n_thresholds)
+                
+                best_threshold = base_threshold
+                best_variance = 0
+                
+                for thresh in thresholds:
+                    # Calculate between-class variance
+                    mask = diff_values > thresh
+                    if np.sum(mask) == 0 or np.sum(mask) == len(diff_values):
+                        continue
+                        
+                    w1 = np.sum(mask) / len(diff_values)
+                    w2 = 1 - w1
+                    
+                    if w1 > 0 and w2 > 0:
+                        mu1 = np.mean(diff_values[mask])
+                        mu2 = np.mean(diff_values[~mask])
+                        between_variance = w1 * w2 * (mu1 - mu2) ** 2
+                        
+                        if between_variance > best_variance:
+                            best_variance = between_variance
+                            best_threshold = thresh
+                
+                threshold_val = best_threshold
+                
+                # Additional check: if very few pixels exceed even the base threshold,
+                # the image might be mostly normal
+                high_diff_ratio = np.sum(diff_values > base_threshold) / len(diff_values)
+                if high_diff_ratio < 0.05:  # Less than 5% high-difference pixels
+                    threshold_val = base_threshold * 1.5  # Be more conservative
+                    
+            else:
+                threshold_val = base_threshold
+            
+            # Create initial binary mask
+            binary_mask = (diff_np > threshold_val).astype(np.uint8)
+            
+            # Remove small isolated components (noise reduction)
+            if min_cluster_size > 0:
+                binary_mask = self.remove_small_components_cv2(binary_mask, min_cluster_size)
+            
+            # Debug print
+            print(f"Batch {i}: Diff range: [{diff_np.min():.6f}, {diff_np.max():.6f}], Threshold: {threshold_val:.6f} (adaptive: {adaptive_threshold})")
+            white_pixels = np.sum(binary_mask)
+            total_pixels = binary_mask.size
+            percentage = white_pixels/total_pixels*100 if total_pixels > 0 else 0
+            print(f"Batch {i}: Mask has {int(white_pixels)} white pixels out of {total_pixels} total ({percentage:.1f}%)")
+            
+            # Skip if no pixels survive the threshold after filtering
+            if binary_mask.sum() == 0:
+                print(f"Batch {i}: Skipping mask - no pixels above threshold after filtering")
+                continue
+            
+            # Convert back to tensor (keep as 0-1 values)
+            segmentation_masks[i, 0] = torch.from_numpy(binary_mask).float().to(device)
+        
+        return segmentation_masks
+    
+    def remove_small_components_cv2(self, binary_mask, min_size):
+        """
+        Remove small connected components from binary mask using OpenCV.
+        Also applies morphological operations to clean up the mask.
+        """
+        # Find connected components
+        num_labels, labels = cv2.connectedComponents(binary_mask)
+        
+        # Create output mask
+        filtered_mask = np.zeros_like(binary_mask)
+        
+        # Keep only components larger than min_size
+        for label in range(1, num_labels):  # Skip background (label 0)
+            component_mask = (labels == label)
+            if np.sum(component_mask) >= min_size:
+                filtered_mask[component_mask] = 1
+        
+        # Apply morphological operations to clean up the mask
+        # Close small gaps within anomaly regions
+        kernel_close = np.ones((3, 3), np.uint8)
+        filtered_mask = cv2.morphologyEx(filtered_mask, cv2.MORPH_CLOSE, kernel_close)
+        
+        # Remove very small noise that might have been introduced by closing
+        kernel_open = np.ones((2, 2), np.uint8)
+        filtered_mask = cv2.morphologyEx(filtered_mask, cv2.MORPH_OPEN, kernel_open)
+        
+        return filtered_mask
     
     def compute_anomaly_score(self, original, healed, method='mse', border_margin=16, 
                             use_concentration=True, concentration_weight=2.0, concentration_method='centroid'):
@@ -155,8 +276,11 @@ class AbnormalToNormalDetector(nn.Module):
                 concentration_method=concentration_method
             )
             
-            # Generate segmentation masks
-            segmentation_masks = self.get_segmentation_mask(images, healed_images)
+            # Generate segmentation masks (using anomaly scores to skip normal images)
+            segmentation_masks = self.get_segmentation_mask(
+                images, healed_images, anomaly_scores, 
+                base_threshold_percentile=85, min_cluster_size=20, adaptive_threshold=True
+            )
             
             predictions = None
             if threshold is not None:
@@ -177,23 +301,19 @@ class AbnormalToNormalLoss(nn.Module):
     """
     
     def __init__(self, lambda_identity=10.0, lambda_healing=2.0, lambda_adversarial=1.0, 
-                 lambda_segmentation=3.0, lambda_perceptual=1.0):
+                 lambda_perceptual=1.0):
         super().__init__()
         self.lambda_identity = lambda_identity
         self.lambda_healing = lambda_healing
         self.lambda_adversarial = lambda_adversarial
-        self.lambda_segmentation = lambda_segmentation
         self.lambda_perceptual = lambda_perceptual
         
         # Loss functions
         self.l1_loss = nn.L1Loss()
         self.mse_loss = nn.MSELoss()
-        self.bce_loss = nn.BCELoss()
         self.adversarial_loss = nn.BCEWithLogitsLoss()  # Use BCEWithLogitsLoss for discriminator
     
-    def forward(self, normal_imgs, abnormal_imgs, healed_normal, healed_abnormal, 
-                seg_masks_normal, seg_masks_abnormal, discriminator, 
-                normal_seg_targets=None, abnormal_seg_targets=None):
+    def forward(self, normal_imgs, abnormal_imgs, healed_normal, healed_abnormal, discriminator):
         """
         Compute comprehensive loss for abnormal-to-normal training
         """
@@ -213,24 +333,7 @@ class AbnormalToNormalLoss(nn.Module):
         adv_loss_abnormal = self.adversarial_loss(discriminator(healed_abnormal), valid_labels)
         adversarial_loss = (adv_loss_normal + adv_loss_abnormal) / 2
         
-        # 4. Segmentation Loss: Direct supervision for abnormality localization
-        segmentation_loss = torch.tensor(0.0, device=normal_imgs.device)
-        if normal_seg_targets is not None and abnormal_seg_targets is not None:
-            # Normal images should have no abnormal regions
-            seg_loss_normal = self.bce_loss(seg_masks_normal, 
-                                          torch.zeros_like(seg_masks_normal))
-            # Abnormal images should have marked abnormal regions
-            seg_loss_abnormal = self.bce_loss(seg_masks_abnormal, abnormal_seg_targets)
-            segmentation_loss = (seg_loss_normal + seg_loss_abnormal) / 2
-        else:
-            # If no segmentation targets, encourage sparse segmentation for normal images
-            seg_loss_normal = self.bce_loss(seg_masks_normal, 
-                                          torch.zeros_like(seg_masks_normal))
-            # For abnormal images, encourage some but not too much segmentation
-            seg_loss_abnormal = torch.mean(seg_masks_abnormal)  # Encourage some activation
-            segmentation_loss = seg_loss_normal + 0.1 * seg_loss_abnormal
-        
-        # 5. Perceptual Loss: Encourage realistic healing
+        # 4. Perceptual Loss: Encourage realistic healing
         # Healed abnormal images should be perceptually similar to normal distribution
         perceptual_loss = self.mse_loss(healed_abnormal.mean(dim=[2,3]), 
                                        normal_imgs.mean(dim=[2,3]))
@@ -239,7 +342,6 @@ class AbnormalToNormalLoss(nn.Module):
         total_loss = (self.lambda_identity * identity_loss + 
                      self.lambda_healing * healing_loss +
                      self.lambda_adversarial * adversarial_loss +
-                     self.lambda_segmentation * segmentation_loss +
                      self.lambda_perceptual * perceptual_loss)
         
         return {
@@ -247,6 +349,6 @@ class AbnormalToNormalLoss(nn.Module):
             'identity_loss': identity_loss,
             'healing_loss': healing_loss,
             'adversarial_loss': adversarial_loss,
-            'segmentation_loss': segmentation_loss,
+            'segmentation_loss': torch.tensor(0.0, device=normal_imgs.device),  # Zero for compatibility
             'perceptual_loss': perceptual_loss
         }

@@ -45,9 +45,10 @@ def sample_images(model, normal_loader, abnormal_loader, dataset_name, batches_d
             healed_normal = model(normal_imgs)
             healed_abnormal = model(abnormal_imgs)
             
-            # Get segmentation masks
-            seg_normal = model.get_segmentation_mask(normal_imgs, healed_normal)
-            seg_abnormal = model.get_segmentation_mask(abnormal_imgs, healed_abnormal)
+            # Get segmentation masks (placeholder scores for sampling)
+            placeholder_scores = torch.ones(normal_imgs.size(0), device=device) * 0.15  # Above threshold
+            seg_normal = model.get_segmentation_mask(normal_imgs, healed_normal, placeholder_scores)
+            seg_abnormal = model.get_segmentation_mask(abnormal_imgs, healed_abnormal, placeholder_scores)
             
             # Create comparison grids
             sample_size = min(4, normal_imgs.size(0), abnormal_imgs.size(0))
@@ -168,7 +169,6 @@ def main():
     parser.add_argument('--lambda_identity', type=float, default=10.0, help='identity loss weight')
     parser.add_argument('--lambda_healing', type=float, default=2.0, help='healing loss weight') 
     parser.add_argument('--lambda_adversarial', type=float, default=1.0, help='adversarial loss weight')
-    parser.add_argument('--lambda_segmentation', type=float, default=3.0, help='segmentation loss weight')
     parser.add_argument('--lambda_perceptual', type=float, default=1.0, help='perceptual loss weight')
     
     opt = parser.parse_args()
@@ -189,7 +189,6 @@ def main():
         lambda_identity=opt.lambda_identity,
         lambda_healing=opt.lambda_healing, 
         lambda_adversarial=opt.lambda_adversarial,
-        lambda_segmentation=opt.lambda_segmentation,
         lambda_perceptual=opt.lambda_perceptual
     )
 
@@ -201,7 +200,16 @@ def main():
     if opt.epoch != 0:
         model_path = f'saved_models/{opt.dataset_name}/abnormal_to_normal_{opt.epoch-1}.pth'
         if os.path.exists(model_path):
-            model.load_state_dict(torch.load(model_path, map_location=device))
+            # Load model weights (ignore segmentation head if present)
+            checkpoint = torch.load(model_path, map_location=device)
+            
+            # Filter out segmentation head parameters if they exist
+            filtered_checkpoint = {}
+            for key, value in checkpoint.items():
+                if not key.startswith('segmentation_head'):
+                    filtered_checkpoint[key] = value
+            
+            model.load_state_dict(filtered_checkpoint, strict=False)
             print(f"Loaded model from {model_path}")
         else:
             print(f"Model not found at {model_path}, starting from scratch")
@@ -210,9 +218,9 @@ def main():
         # Initialize weights
         model.apply(weights_init_normal)
 
-    # Optimizers
+    # Optimizers (removed segmentation_head since it no longer exists)
     optimizer_G = torch.optim.Adam(
-        itertools.chain(model.healing_generator.parameters(), model.segmentation_head.parameters()),
+        model.healing_generator.parameters(),
         lr=opt.lr, betas=(opt.b1, opt.b2)
     )
     optimizer_D = torch.optim.Adam(model.discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
@@ -331,14 +339,9 @@ def main():
             healed_normal = model.healing_generator(normal_imgs)
             healed_abnormal = model.healing_generator(abnormal_imgs)
             
-            # Generate segmentation masks
-            seg_normal = model.get_segmentation_mask(normal_imgs, healed_normal)
-            seg_abnormal = model.get_segmentation_mask(abnormal_imgs, healed_abnormal)
-            
             # Compute generator loss
             loss_components = criterion(
-                normal_imgs, abnormal_imgs, healed_normal, healed_abnormal,
-                seg_normal, seg_abnormal, model.discriminator
+                normal_imgs, abnormal_imgs, healed_normal, healed_abnormal, model.discriminator
             )
             
             loss_G = loss_components['total_loss']
